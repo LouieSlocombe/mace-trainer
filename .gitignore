@@ -36,3 +36,7 @@ htmlcov/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# Generated reference data and separately obtained OMol basis
+runs/
+examples/def2-tzvpd.bas

@@ -1,12 +1,15 @@
 # Conda environment
 
-uv is the recommended way to work on this project (see the root `README.md`).
-If you prefer Conda, create and activate the optional environment from the
-repository root, then install the package and its development tools with pip:
+This file creates the lightweight development environment. It does not install
+the molecular-dynamics backend or ORCA. For actual dynamics, follow the
+openmmqmmm environment instructions in the root `README.md` and install
+mace-trainer there.
+
+To create a separate development environment from the repository root:
 
 ```bash
 conda env create -f build_tools/environment.yml
-conda activate template-python
+conda activate mace-trainer
 python -m pip install --group dev -e .
 ```
 

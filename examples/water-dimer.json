@@ -1,0 +1,35 @@
+{
+  "system": {
+    "pdb": "water-dimer.pdb",
+    "forcefields": ["amber14/tip3p.xml"],
+    "qm_atoms": [0, 1, 2],
+    "qm_charge": 0,
+    "qm_multiplicity": 1,
+    "periodic": false,
+    "platform": "CPU"
+  },
+  "orca": {
+    "basis_file": "def2-tzvpd.bas",
+    "numcores": 1,
+    "maxcore_mb": 2000
+  },
+  "conditions": [
+    {
+      "name": "water-300K",
+      "temperature_kelvin": 300,
+      "steps": 5,
+      "seed": 3001,
+      "timestep_fs": 0.5,
+      "trajectory_interval": 1
+    },
+    {
+      "name": "water-350K",
+      "temperature_kelvin": 350,
+      "steps": 5,
+      "seed": 3501,
+      "timestep_fs": 0.5,
+      "trajectory_interval": 1
+    }
+  ],
+  "output_dir": "../runs/water-dimer"
+}

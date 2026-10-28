@@ -1,139 +1,165 @@
-# template-python
+# mace-trainer
 
-A compact starting point for a modern, typed Python package. It uses
-[uv](https://docs.astral.sh/uv/) for environments, locking, and builds, a `src`
-layout, Ruff, strict mypy, pytest with full branch coverage, prek hooks, and
-GitHub Actions with trusted publishing to PyPI.
+Generate reference data for **MACE-SCF as an electrostatically embedded QM
+driver in QM/MM simulations**. This repository runs ORCA-driven QM/MM molecular
+dynamics through [openmmqmmm](https://github.com/LouieSlocombe/openmmqmmm) and
+archives the actual QM evaluations under different MD conditions.
 
-The example package exposes a tiny NumPy API and a command-line entry point so
-the template works end to end before you replace the sample code.
+The first workflow supports independent NVT runs with configurable temperature,
+random seed, timestep and duration. Each condition starts from the supplied PDB
+with a fresh MM system, ORCA theory and Langevin integrator. The example is a
+small water dimer: one QM water and one MM water. It is a smoke test, not a
+production sampling protocol.
 
-## Requirements
+## Scientific scope
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.12 or newer.
-  uv installs the Python version pinned in `.python-version` (3.14) if it is
-  missing.
+The `omol25-derived-mbis` profile uses **wB97M-V/def2-TZVPD**, RIJCOSX, def2/J,
+DEFGRID3 and the SCF thresholds from the
+[official OMol25 input generator](https://github.com/facebookresearch/fairchem/blob/main/src/fairchem/data/omol/orca/calc.py).
+Supply its [distributed basis file](https://github.com/facebookresearch/fairchem/blob/main/src/fairchem/data/omol/orca/basis/def2-tzvpd.bas),
+named `def2-tzvpd.bas`. The input is printed by `--dry-run`; the supplied file is
+hashed and copied into the archive. Its contents are not checked against a
+canonical checksum, so obtaining the correct basis is part of setup.
 
-## Quick start
+This is an OMol-derived electronic-structure profile, not a reproduction of the
+OMol dataset. Electrostatic embedding changes the Hamiltonian. We add MBIS
+atomic multipole output and disable NBO/NPA to avoid requiring an external NBO
+installation. OMol25 used ORCA **6.0.0**; the installed executable's actual
+version remains in each archived ORCA log. Results from a different ORCA version
+must be identified as such. Openmmqmmm supplies the EnGrad directive, charge,
+multiplicity, coordinates, point charges and parallel settings.
 
-Create the environment with the package and its development tools:
+**Current integration limit:** the MACE-SCF ORCA converter currently rejects
+point-charge and QM/MM calculations. These archives preserve the embedded
+reference problem; they are not yet MACE-SCF training files. A subsequent adapter
+must represent the inhomogeneous MM electrostatic field and define consistent
+energy/force targets. Stripping the point charges or treating total QM/MM energy
+as isolated QM energy would produce incorrect labels.
+
+## Install
+
+Python 3.12 or newer is supported. For lightweight development and dry runs:
 
 ```bash
 uv sync
+uv run mace-trainer --help
 ```
 
-Run the example:
+For dynamics, install this package into an environment containing a current
+`openmmqmmm` and OpenMM with `PythonForce` support (the inspected backend uses
+OpenMM 8.6). Follow the
+[openmmqmmm installation instructions](https://github.com/LouieSlocombe/openmmqmmm#installation)
+first, then, in that activated environment:
 
 ```bash
-uv run template-python Ada
-uv run python -m template_python Ada
+python -m pip install -e /path/to/mace-trainer
 ```
 
-Or use the library:
+ORCA is installed separately. Set `OPENMMQMMM_ORCADIR` to its installation
+directory, put ORCA on `PATH`, or provide `orca.orcadir` in the configuration.
+For multiple ORCA processes, the backend also requires compatible OpenMPI.
+`maxcore_mb` is memory **per ORCA process**.
 
-```python
-from template_python import line, print_hello
+## Run a campaign
 
-print_hello("Ada")
-samples = line(-1.0, 1.0, num=5)
-print(samples)
+Save the official basis file as `examples/def2-tzvpd.bas`. Inspect the configuration
+and generated method settings before starting:
+
+```bash
+python -m mace_trainer examples/water-dimer.json --dry-run
+python -m mace_trainer examples/water-dimer.json
 ```
+
+The dry run validates configuration and input paths without importing OpenMM or
+launching ORCA. OpenMM resolves built-in forcefield XML identifiers when running;
+a dry run does not validate forcefield compatibility, QM boundaries or electronic
+convergence. Custom XML files can be specified with explicit paths.
+
+All paths are relative to the configuration file. QM indices are zero based in
+PDB atom order; charge and multiplicity refer to the QM region. Temperature is
+kelvin, timestep is femtoseconds, and duration is a positive step count. Unknown
+configuration keys and invalid numbers are rejected. Use a prepared,
+parameterized PDB; this workflow does not solvate, minimize or equilibrate it.
+
+Runs use unconstrained bonds, physical hydrogen masses, the full MM point-charge
+field and fixed MM charges. ORCA evaluates the forces during integration. Each
+condition has a seeded Langevin thermostat and seeded thermal initial velocities;
+this does not promise identical floating-point trajectories across platforms.
+Periodic systems use openmmqmmm's finite, imaged embedding field, not a periodic
+QM Ewald Hamiltonian. Cell-size convergence remains a sampling design question.
+
+Conditions execute sequentially in separate directories. An existing output
+directory is rejected, including one from a failed campaign. Choose a new output
+directory to rerun; automatic continuation and resume are not implemented.
+Dynamics use the archived PDB and basis copies, so later edits to the source
+files cannot change subsequent conditions. Custom forcefield XML files and
+their includes remain external and must stay unchanged; top-level custom XML
+hashes are checked before each condition. The serialized MM system records the
+parameters actually constructed for each run.
+
+## Archive contents
+
+```text
+runs/water-dimer/
+  campaign.json                 # resolved configuration, profile, input hashes
+  inputs/                       # PDB and supplied basis snapshot
+  water-300K/
+    run.json                    # condition status, software versions, call count
+    mm-system.xml               # partitioned MM system before adding QM callback
+    trajectory.dcd             # full-system coordinates at reporting interval
+    state.csv                   # MD state reports
+    evaluations/00000001/
+      evaluation.json           # actual inputs, embedding, raw labels and status
+      orca.inp
+      orca.out
+      orca.engrad
+      orca.pc
+      orca.pcgrad
+      orca.property.txt         # when produced by ORCA
+```
+
+Every **actual ORCA call** receives an evaluation ID; this is not an MD step
+number. OpenMM can request extra evaluations for initialization and reporting,
+and reuse cached results for repeated geometries. Each record contains the
+QM coordinates including caps, effective MM point-charge coordinates and charges,
+QM atom mapping, link-atom host pairs, full system coordinates and supplied box
+vectors. Raw QM energies are in hartree and QM/point-charge **gradients** in
+hartree/bohr. Forces require a minus sign and explicit unit conversion. The QM
+energy includes its interaction with the supplied external charges; it is not the
+total QM/MM energy reported by the MD engine. Link gradients are stored before
+projection onto the physical atoms. Point-charge rows can include redistributed
+boundary sites and are not a direct list of physical MM-atom force labels.
+
+Failed calculations retain their current artifacts and failure metadata, then
+stop the campaign. Stale text outputs are removed before each call, and finite
+labels, gradient shapes and required files are checked before marking success.
+The current wavefunction is kept in the working directory for SCF reuse, but
+per-evaluation GBW/density archives are not yet supported. This limits future
+repartitioning that requires wavefunctions; MBIS output and property files should
+be checked against the eventual training target before large campaigns.
 
 ## Development
 
-Install the Git hooks once. They then run Ruff, lockfile, workflow security,
-and file hygiene checks before each commit:
-
 ```bash
-uv run prek install
-```
-
-Run the complete local checks:
-
-```bash
-uv run prek run --all-files
+uv run ruff check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest
+uv run prek run --all-files
 uv build
 ```
 
-Ruff can apply safe lint and formatting changes with:
+Unit tests exercise configuration validation, profile generation, backend
+integration and archival failures without requiring ORCA. A local one-step
+water-dimer smoke run was also verified with ORCA 6.1.1 and OpenMM 8.6.1: both
+QM evaluations completed with energies, QM/point-charge gradients and MBIS
+outputs archived. This checks the execution path, not production sampling
+quality or MACE-SCF training compatibility. The runtime MD dependencies are
+kept separate from the lightweight core environment.
 
-```bash
-uv run ruff check --fix .
-uv run ruff format .
-```
-
-The hooks use the standard `.pre-commit-config.yaml` format, so
-`pre-commit` works too if you prefer it.
-
-### Dependencies
-
-`pyproject.toml` declares the oldest versions the package supports and
-`uv.lock` pins the exact versions used in development and CI. CI also tests
-against the oldest allowed versions, so keep lower bounds honest.
-
-```bash
-uv add requests                # add a runtime dependency
-uv add --group dev hypothesis  # add a development tool
-uv lock --upgrade              # refresh every locked version
-```
-
-Dependabot refreshes `uv.lock`, the pre-commit hooks, and the GitHub Actions
-once a month, grouping each into a single pull request.
-
-### Continuous integration
-
-Every push to `main` and every pull request runs the hooks and mypy, tests on
-Linux, macOS, and Windows with Python 3.14 and the upcoming 3.15, tests the
-free-threaded 3.14t build and the oldest allowed dependencies, and builds and
-smoke tests the sdist and wheel. Require the **All checks passed** job in
-branch protection rather than each matrix entry.
-
-## Releasing
-
-1. Add the repository as a
-   [trusted publisher](https://docs.pypi.org/trusted-publishers/) on PyPI, with
-   workflow `release.yml` and environment `pypi`, and create a `pypi`
-   environment in the repository settings.
-2. Bump the version and commit it, for example `uv version --bump minor`.
-3. Publish a GitHub release whose tag is the version prefixed with `v`, such as
-   `v0.1.0`. The release workflow checks the tag matches, builds the
-   distributions, and uploads them to PyPI with attestations.
-
-## Conda
-
-If you prefer Conda, see [`build_tools/`](build_tools/README.md).
-
-## Project layout
-
-```text
-.
-├── .github/
-│   ├── dependabot.yml          # monthly grouped dependency updates
-│   └── workflows/              # CI and PyPI release
-├── build_tools/                # optional Conda setup
-├── src/template_python/        # installable package
-├── tests/                      # behavior-focused tests
-├── .pre-commit-config.yaml     # Git hooks run by prek or pre-commit
-├── .python-version             # development Python version for uv
-├── pyproject.toml              # project metadata and tool configuration
-└── uv.lock                     # pinned development dependencies
-```
-
-## Use this template
-
-After creating a repository from this template:
-
-1. Rename the `template-python` distribution, `src/template_python` import
-   package, and console command.
-2. Update the description, author, repository URLs, and license metadata.
-3. Choose the Python versions your project supports in `requires-python`,
-   the classifiers, `.python-version`, and the CI matrix.
-4. Replace the example API and tests while keeping the quality gates green.
-5. Set a real release version and configure trusted publishing only when the
-   package is ready to publish.
+The next milestones are embedded MACE-SCF export, additional sampling controls,
+restartable campaigns and trajectory-level train/validation/test splits.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+This repository is available under the [MIT License](LICENSE).

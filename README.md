@@ -11,6 +11,9 @@ with a fresh MM system, ORCA theory and Langevin integrator. The example is a
 small water dimer: one QM water and one MM water. It is a smoke test, not a
 production sampling protocol.
 
+See the [data acquisition strategy](docs/data-acquisition-strategy.md) for the
+literature review, proposed sampling improvements and validation plan.
+
 ## Scientific scope
 
 The `omol25-derived-mbis` profile uses **wB97M-V/def2-TZVPD**, RIJCOSX, def2/J,

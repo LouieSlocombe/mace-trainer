@@ -20,13 +20,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="validate and print the plan without ORCA",
     )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="maximum independent conditions to run concurrently (default: 1)",
+    )
     args = parser.parse_args(argv)
+    if args.jobs < 1:
+        parser.error("--jobs must be a positive integer")
     try:
         campaign = load_config(args.config)
         if args.dry_run:
-            print(json.dumps(campaign_plan(campaign), indent=2, allow_nan=False))
+            print(
+                json.dumps(
+                    campaign_plan(campaign, jobs=args.jobs), indent=2, allow_nan=False
+                )
+            )
         else:
-            run_campaign(campaign)
+            run_campaign(campaign, jobs=args.jobs)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"mace-trainer: {exc}\n")
     return 0

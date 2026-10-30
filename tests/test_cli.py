@@ -1,6 +1,7 @@
 """Check reviewable dry runs, execution dispatch, and useful CLI failures."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,57 +12,77 @@ from mace_trainer import __version__
 from mace_trainer.config import Campaign
 
 
-@pytest.fixture
-def cli_config(tmp_path: Path) -> Path:
-    (tmp_path / "system.pdb").write_text("END\n", encoding="utf-8")
-    (tmp_path / "def2-tzvpd.bas").write_text("basis fixture\n", encoding="utf-8")
-    config: dict[str, Any] = {
-        "system": {
-            "pdb": "system.pdb",
-            "forcefields": ["amber14-all.xml"],
-            "qm_atoms": [0],
-            "qm_charge": 0,
-            "qm_multiplicity": 1,
-        },
-        "orca": {"basis_file": "def2-tzvpd.bas"},
-        "conditions": [
-            {"name": "test", "temperature_kelvin": 300, "steps": 1, "seed": 17}
-        ],
-        "output_dir": "runs",
-    }
-    path = tmp_path / "campaign.json"
-    path.write_text(json.dumps(config), encoding="utf-8")
-    return path
-
-
 def test_cli_dry_run_produces_plan_without_running_dynamics(
-    cli_config: Path,
+    config_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def forbidden_run(campaign: Campaign) -> None:
-        pytest.fail(f"Dry run must not execute {campaign.output_dir}")
+    def forbidden_run(campaign: Campaign, *, jobs: int) -> None:
+        pytest.fail(f"Dry run must not execute {campaign.output_dir} with {jobs} jobs")
 
     monkeypatch.setattr(cli, "run_campaign", forbidden_run)
-    assert cli.main([str(cli_config), "--dry-run"]) == 0
+    assert cli.main([str(config_path), "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["ensemble"] == "NVT"
+    assert plan["parallel_jobs"] == 1
     assert plan["embedding"] == "elstat"
     assert plan["profile"] == "omol25-derived-mbis"
     assert plan["reference_orca_version"] == "6.0.0"
-    assert plan["campaign"]["conditions"][0]["seed"] == 17
+    assert plan["campaign"]["conditions"][0]["seed"] == 42
     assert "pending" in plan["training_export"]
-    assert not (cli_config.parent / "runs").exists()
+    assert not (config_path.parent / "runs").exists()
 
 
-def test_cli_dispatches_validated_campaign(
-    cli_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_cli_dry_run_caps_parallel_jobs_at_condition_count(
+    config_data: dict[str, Any],
+    write_config: Callable[[dict[str, Any]], Path],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    captured: list[Campaign] = []
-    monkeypatch.setattr(cli, "run_campaign", captured.append)
-    assert cli.main([str(cli_config)]) == 0
+    config_data["conditions"].append(
+        {
+            **config_data["conditions"][0],
+            "name": "water-350K",
+            "temperature_kelvin": 350,
+            "seed": 43,
+        }
+    )
+    config_path = write_config(config_data)
+
+    assert cli.main([str(config_path), "--dry-run", "--jobs", "8"]) == 0
+
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["parallel_jobs"] == 2
+    assert not (config_path.parent / "runs").exists()
+
+
+@pytest.mark.parametrize(("options", "jobs"), [([], 1), (["--jobs", "3"], 3)])
+def test_cli_dispatches_validated_campaign(
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    options: list[str],
+    jobs: int,
+) -> None:
+    captured: list[tuple[Campaign, int]] = []
+
+    def capture_run(campaign: Campaign, *, jobs: int) -> None:
+        captured.append((campaign, jobs))
+
+    monkeypatch.setattr(cli, "run_campaign", capture_run)
+    assert cli.main([str(config_path), *options]) == 0
     assert len(captured) == 1
-    assert captured[0].system.pdb == cli_config.parent / "system.pdb"
+    campaign, actual_jobs = captured[0]
+    assert campaign.system.pdb == config_path.parent / "system.pdb"
+    assert actual_jobs == jobs
+
+
+@pytest.mark.parametrize("jobs", ["0", "-1", "1.5", "many"])
+def test_cli_rejects_invalid_job_counts(
+    jobs: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["campaign.json", "--jobs", jobs])
+    assert exit_info.value.code == 2
+    assert "--jobs" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -69,18 +90,19 @@ def test_cli_dispatches_validated_campaign(
     [OSError("disk full"), ValueError("invalid atoms"), RuntimeError("ORCA failed")],
 )
 def test_cli_reports_execution_failures_without_traceback(
-    cli_config: Path,
+    config_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     error: Exception,
 ) -> None:
-    def fail_run(campaign: Campaign) -> None:
+    def fail_run(campaign: Campaign, *, jobs: int) -> None:
         assert campaign.conditions
+        assert jobs == 1
         raise error
 
     monkeypatch.setattr(cli, "run_campaign", fail_run)
     with pytest.raises(SystemExit) as exit_info:
-        cli.main([str(cli_config)])
+        cli.main([str(config_path)])
     assert exit_info.value.code == 1
     assert capsys.readouterr().err == f"mace-trainer: {error}\n"
 

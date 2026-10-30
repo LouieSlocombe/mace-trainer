@@ -1,17 +1,21 @@
 """Run independent NVT conditions through the public openmmqmmm API.
 
-The backend writes into the process working directory. Campaigns therefore run
-sequentially; use separate processes and output directories for parallel work.
+The backend writes into the process working directory. Parallel conditions use
+separate spawned processes so their files and backend state remain isolated.
 """
 
 import hashlib
 import importlib
 import json
+import multiprocessing
 import platform
 import shutil
+import sys
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import chdir
 from dataclasses import replace
 from importlib.metadata import PackageNotFoundError, version
+from itertools import islice
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -20,9 +24,18 @@ from .archive import EvaluationArchive
 from .config import Campaign, Condition, campaign_to_dict
 from .profile import ORCA_REFERENCE_VERSION, PROFILE_NAME, SOURCE_URL, orca_input
 
+_MAX_WINDOWS_WORKERS = 61  # ProcessPoolExecutor's Windows handle limit.
 
-def campaign_plan(campaign: Campaign) -> dict[str, object]:
+
+def campaign_plan(campaign: Campaign, *, jobs: int = 1) -> dict[str, object]:
     """Describe the exact method and conditions without importing the MD backend."""
+    if type(jobs) is not int or jobs < 1:
+        raise ValueError("jobs must be a positive integer")
+    workers = min(jobs, len(campaign.conditions))
+    if sys.platform == "win32" and workers > _MAX_WINDOWS_WORKERS:
+        raise ValueError(
+            f"Windows supports at most {_MAX_WINDOWS_WORKERS} parallel jobs"
+        )
     simple, blocks = orca_input(campaign.orca.maxcore_mb, campaign.orca.basis_file)
     return {
         "schema_version": 1,
@@ -35,6 +48,7 @@ def campaign_plan(campaign: Campaign) -> dict[str, object]:
         "ensemble": "NVT",
         "embedding": "elstat",
         "integrator": "LangevinMiddleIntegrator",
+        "parallel_jobs": workers,
         "training_export": "pending MACE-SCF support for point-charge embedding",
     }
 
@@ -209,9 +223,57 @@ def _drive(
         engine.close()
 
 
-def run_campaign(campaign: Campaign) -> None:
-    """Run each condition once, refusing to overwrite any campaign directory."""
-    plan = campaign_plan(campaign)
+def _verify_forcefields(forcefield_hashes: dict[str, str]) -> None:
+    for name, expected_hash in forcefield_hashes.items():
+        if _hash_file(Path(name)) != expected_hash:
+            raise ValueError(f"Custom forcefield changed during the campaign: {name}")
+
+
+def _run_condition_in_process(
+    campaign: Campaign, condition: Condition, forcefield_hashes: dict[str, str]
+) -> None:
+    backend, openmm = _load_backend()
+    _verify_forcefields(forcefield_hashes)
+    _run_condition(campaign, condition, backend, openmm)
+
+
+def _run_parallel(
+    campaign: Campaign, workers: int, forcefield_hashes: dict[str, str]
+) -> None:
+    conditions = iter(campaign.conditions)
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
+        pending = {
+            executor.submit(
+                _run_condition_in_process, campaign, condition, forcefield_hashes
+            )
+            for condition in islice(conditions, workers)
+        }
+        while pending:
+            completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+            # Observe every completed result before starting more conditions. On
+            # failure, let in-flight runs finish and close their engines normally.
+            for future in completed:
+                future.result()
+            for condition in islice(conditions, len(completed)):
+                pending.add(
+                    executor.submit(
+                        _run_condition_in_process,
+                        campaign,
+                        condition,
+                        forcefield_hashes,
+                    )
+                )
+
+
+def run_campaign(campaign: Campaign, *, jobs: int = 1) -> None:
+    """Run conditions in up to jobs processes, refusing to overwrite outputs.
+
+    One job runs in the current process. Parallel jobs each load a fresh backend;
+    once a failure is reported, active conditions finish but no more are scheduled.
+    """
+    plan = campaign_plan(campaign, jobs=jobs)
     backend, openmm = _load_backend()
     campaign.output_dir.mkdir(parents=True, exist_ok=False)
     inputs = campaign.output_dir / "inputs"
@@ -235,11 +297,11 @@ def run_campaign(campaign: Campaign) -> None:
     }
     plan["execution_campaign"] = campaign_to_dict(execution_campaign)
     plan["orcablocks"] = campaign_plan(execution_campaign)["orcablocks"]
+    workers = min(jobs, len(campaign.conditions))
     _write_json(campaign.output_dir / "campaign.json", plan)
-    for condition in campaign.conditions:
-        for name, expected_hash in forcefield_hashes.items():
-            if _hash_file(Path(name)) != expected_hash:
-                raise ValueError(
-                    f"Custom forcefield changed during the campaign: {name}"
-                )
-        _run_condition(execution_campaign, condition, backend, openmm)
+    if workers > 1:
+        _run_parallel(execution_campaign, workers, forcefield_hashes)
+    else:
+        for condition in campaign.conditions:
+            _verify_forcefields(forcefield_hashes)
+            _run_condition(execution_campaign, condition, backend, openmm)

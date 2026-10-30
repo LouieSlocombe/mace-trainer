@@ -91,9 +91,27 @@ this does not promise identical floating-point trajectories across platforms.
 Periodic systems use openmmqmmm's finite, imaged embedding field, not a periodic
 QM Ewald Hamiltonian. Cell-size convergence remains a sampling design question.
 
-Conditions execute sequentially in separate directories. An existing output
-directory is rejected, including one from a failed campaign. Choose a new output
-directory to rerun; automatic continuation and resume are not implemented.
+Conditions execute sequentially by default. To shorten campaigns with multiple
+independent conditions, use `--jobs` (or `-j`):
+
+```bash
+python -m mace_trainer examples/water-dimer.json --jobs 2 --dry-run
+python -m mace_trainer examples/water-dimer.json --jobs 2
+```
+
+Each parallel condition uses a separate process and directory, with its own
+backend and ORCA restart files. The job count is capped at the number of
+conditions and recorded as `parallel_jobs` in the plan; Windows supports at most
+61 concurrent jobs. Budget CPU and memory for
+all concurrent jobs: `jobs × orca.numcores` ORCA processes, each with
+`orca.maxcore_mb` memory plus backend overhead. A single condition still runs its
+MD steps sequentially. Once a worker reports a failure, no further conditions
+are scheduled; active conditions finish and close their engines before the
+campaign returns the error.
+
+An existing output directory is rejected, including one from a failed campaign.
+Choose a new output directory to rerun; automatic continuation and resume are
+not implemented.
 Dynamics use the archived PDB and basis copies, so later edits to the source
 files cannot change subsequent conditions. Custom forcefield XML files and
 their includes remain external and must stay unchanged; top-level custom XML
@@ -159,6 +177,11 @@ QM evaluations completed with energies, QM/point-charge gradients and MBIS
 outputs archived. This checks the execution path, not production sampling
 quality or MACE-SCF training compatibility. The runtime MD dependencies are
 kept separate from the lightweight core environment.
+
+CI tests Python 3.12–3.15 on Linux, Python 3.14 on macOS and Windows, and the
+minimum dependencies and free-threaded Python build on Linux. Every test job
+checks 100% branch coverage; the smaller matrix avoids repeating every Python
+version on every operating system.
 
 The next milestones are embedded MACE-SCF export, additional sampling controls,
 restartable campaigns and trajectory-level train/validation/test splits.
